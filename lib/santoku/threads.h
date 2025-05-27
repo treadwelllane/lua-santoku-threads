@@ -6,6 +6,7 @@
 #include <santoku/lua/utils.h>
 
 #include <pthread.h>
+#include <unistd.h>
 #include <sched.h>
 #include <numa.h>
 
