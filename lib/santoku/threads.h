@@ -7,6 +7,7 @@
 
 #include <pthread.h>
 #include <unistd.h>
+#include <assert.h>
 #include <sched.h>
 #include <numa.h>
 
