@@ -86,7 +86,6 @@ static void *tk_thread_worker (void *arg)
   tk_thread_t *data = (tk_thread_t *) arg;
   if (numa_available() != -1 && numa_max_node() > 0)
     tk_threads_pin(data->index, data->pool->n_threads);
-  seed_rand(data->index);
   pthread_mutex_lock(&data->pool->mutex);
   data->pool->n_threads_done ++;
   if (data->pool->n_threads_done == data->pool->n_threads)
