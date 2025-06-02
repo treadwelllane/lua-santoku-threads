@@ -1,7 +1,5 @@
-# Now
+# Next
 
-- Expose Lua API
-
-# Consider
-
-- Integrate into santoku-system
+- Expose a Lua API like santoku-system, except threads instead of processes
+    - Each thread get own lua state
+    - Should work native and wasm/browser
