@@ -9,7 +9,15 @@
 #include <unistd.h>
 #include <assert.h>
 #include <sched.h>
+#if __has_include(<numa.h>)
+#define HAVE_NUMA 1
 #include <numa.h>
+#include <numaif.h>
+#else
+#define numa_available(...) 0
+#define numa_free(p, s) free(p)
+#define numa_alloc_interleaved(s) malloc(s)
+#endif
 
 typedef struct tk_threadpool_s tk_threadpool_t;
 typedef struct tk_thread_s tk_thread_t;
@@ -49,6 +57,7 @@ static inline void tk_threads_pin (
   unsigned int thread_index,
   unsigned int n_threads
 ) {
+#if defined(HAVE_NUMA)
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
   unsigned int n_nodes = (unsigned int) numa_max_node() + 1;
@@ -81,13 +90,19 @@ static inline void tk_threads_pin (
   }
   numa_free_cpumask(cpus);
   pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+#else
+  (void) thread_index;
+  (void) n_threads;
+#endif
 }
 
 static void *tk_thread_worker (void *arg)
 {
   tk_thread_t *data = (tk_thread_t *) arg;
+#if defined(HAVE_NUMA)
   if (numa_available() != -1 && numa_max_node() > 0)
     tk_threads_pin(data->index, data->pool->n_threads);
+#endif
   pthread_mutex_lock(&data->pool->mutex);
   data->pool->n_threads_done ++;
   if (data->pool->n_threads_done == data->pool->n_threads)
