@@ -1,7 +1,7 @@
 local env = {
 
   name = "santoku-threads",
-  version = "0.0.8-1",
+  version = "0.0.10-1",
   variable_prefix = "TK_THREADS",
   license = "MIT",
   public = true,

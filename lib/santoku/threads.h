@@ -34,6 +34,9 @@ struct tk_threadpool_s {
   tk_thread_t *threads;
   tk_thread_worker_t worker;
   unsigned int sigid;
+
+  int notify_enabled;
+  int notified_child;
 };
 
 struct tk_thread_s {
@@ -47,6 +50,29 @@ struct tk_thread_s {
   unsigned int sigid;
 };
 
+static inline void tk_threads_notify_parent (
+  tk_thread_t *thread
+) {
+  pthread_mutex_lock(&thread->pool->mutex);
+  int enabled = thread->pool->notify_enabled;
+  pthread_mutex_unlock(&thread->pool->mutex);
+  if (!enabled)
+    return;
+  pthread_mutex_lock(&thread->child_mutex);
+  thread->waiting_for_ack = 1;
+  pthread_mutex_unlock(&thread->child_mutex);
+  pthread_mutex_lock(&thread->pool->mutex);
+  while (thread->pool->notified_child != -1)
+    pthread_cond_wait(&thread->pool->cond_done, &thread->pool->mutex);
+  thread->pool->notified_child = (int) thread->index;
+  pthread_cond_signal(&thread->pool->cond_done);
+  pthread_mutex_unlock(&thread->pool->mutex);
+  pthread_mutex_lock(&thread->child_mutex);
+  while (thread->waiting_for_ack)
+    pthread_cond_wait(&thread->child_cond, &thread->child_mutex);
+  pthread_mutex_unlock(&thread->child_mutex);
+}
+
 static inline void tk_threads_wait (
   tk_threadpool_t *pool
 ) {
@@ -54,6 +80,46 @@ static inline void tk_threads_wait (
   while (pool->n_threads_done < pool->n_threads)
     pthread_cond_wait(&pool->cond_done, &pool->mutex);
   pthread_mutex_unlock(&pool->mutex);
+}
+
+static inline int tk_threads_signal (
+  tk_threadpool_t *pool,
+  int stage,
+  unsigned int *child
+) {
+  pthread_mutex_lock(&pool->mutex);
+  int starting =
+    (stage != pool->stage) || (pool->n_threads_done == pool->n_threads) || (pool->stage < 0);
+  if (starting) {
+    pool->sigid ++;
+    pool->stage = stage;
+    pool->n_threads_done = 0;
+    pool->notified_child = -1;
+    pthread_cond_broadcast(&pool->cond_stage);
+  }
+  pool->notify_enabled = (child != NULL);
+  if (!child) {
+    while (pool->n_threads_done < pool->n_threads)
+      pthread_cond_wait(&pool->cond_done, &pool->mutex);
+    pool->notify_enabled = 0;
+    pthread_mutex_unlock(&pool->mutex);
+    return 0;
+  }
+  for (;;) {
+    if (pool->notified_child != -1) {
+      *child = (unsigned int) pool->notified_child;
+      pool->notified_child = -1;
+      pthread_cond_broadcast(&pool->cond_done);
+      pthread_mutex_unlock(&pool->mutex);
+      return 1;
+    }
+    if (pool->n_threads_done == pool->n_threads) {
+      pool->notify_enabled = 0;
+      pthread_mutex_unlock(&pool->mutex);
+      return 0;
+    }
+    pthread_cond_wait(&pool->cond_done, &pool->mutex);
+  }
 }
 
 static inline void tk_threads_pin (
@@ -99,22 +165,7 @@ static inline void tk_threads_pin (
 #endif
 }
 
-static inline void tk_thread_notify_parent (
-  tk_thread_t *thread
-) {
-  pthread_mutex_lock(&thread->pool->mutex);
-  thread->pool->n_threads_done = thread->index + 1;
-  pthread_cond_signal(&thread->pool->cond_done);
-  pthread_mutex_unlock(&thread->pool->mutex);
-
-  pthread_mutex_lock(&thread->child_mutex);
-  thread->waiting_for_ack = 1;
-  while (thread->waiting_for_ack)
-    pthread_cond_wait(&thread->child_cond, &thread->child_mutex);
-  pthread_mutex_unlock(&thread->child_mutex);
-}
-
-static inline void tk_thread_acknowledge_child (
+static inline void tk_threads_acknowledge_child (
   tk_threadpool_t *pool,
   unsigned int child_index
 ) {
@@ -213,6 +264,8 @@ static inline tk_threadpool_t *tk_threads_create (
   pool->stage = -2;
   pool->threads = tk_malloc(L, pool->n_threads * sizeof(tk_thread_t));
   pool->worker = worker;
+  pool->notify_enabled = 0;
+  pool->notified_child = -1;
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
     tk_thread_t *data = pool->threads + i;
     data->pool = pool;
@@ -226,29 +279,6 @@ static inline tk_threadpool_t *tk_threads_create (
   }
   tk_threads_wait(pool);
   return pool;
-}
-
-static inline void tk_threads_signal (
-  tk_threadpool_t *pool,
-  int stage,
-  unsigned int *child
-) {
-  pthread_mutex_lock(&pool->mutex);
-  pool->sigid ++;
-  pool->stage = stage;
-  pool->n_threads_done = 0;
-  pthread_cond_broadcast(&pool->cond_stage);
-  pthread_mutex_unlock(&pool->mutex);
-  if (child) {
-    pthread_mutex_lock(&pool->mutex);
-    while (pool->n_threads_done < 1)
-      pthread_cond_wait(&pool->cond_done, &pool->mutex);
-    *child = pool->n_threads_done - 1;
-    pthread_mutex_unlock(&pool->mutex);
-  } else {
-    tk_threads_wait(pool);
-  }
-  pthread_cond_broadcast(&pool->cond_stage);
 }
 
 static inline void tk_threads_destroy (
