@@ -30,6 +30,8 @@ struct tk_threadpool_s {
   pthread_cond_t cond_done;
   unsigned int n_threads;
   unsigned int n_threads_done;
+  unsigned int signal_index;
+  int current_stage;
   int stage;
   tk_thread_t *threads;
   tk_thread_worker_t worker;
@@ -47,6 +49,21 @@ struct tk_thread_s {
   unsigned int sigid;
 };
 
+static inline void tk_threads_notify_parent (
+  tk_thread_t *thread
+) {
+  pthread_mutex_lock(&thread->pool->mutex);
+  thread->pool->signal_index = thread->index;
+  pthread_cond_signal(&thread->pool->cond_done);
+  pthread_mutex_unlock(&thread->pool->mutex);
+
+  pthread_mutex_lock(&thread->child_mutex);
+  thread->waiting_for_ack = 1;
+  while (thread->waiting_for_ack)
+    pthread_cond_wait(&thread->child_cond, &thread->child_mutex);
+  pthread_mutex_unlock(&thread->child_mutex);
+}
+
 static inline void tk_threads_wait (
   tk_threadpool_t *pool
 ) {
@@ -55,6 +72,75 @@ static inline void tk_threads_wait (
     pthread_cond_wait(&pool->cond_done, &pool->mutex);
   pthread_mutex_unlock(&pool->mutex);
 }
+
+static inline int tk_threads_signal (
+  tk_threadpool_t *pool,
+  int stage,
+  unsigned int *child
+) {
+  pthread_mutex_lock(&pool->mutex);
+  if (stage != pool->current_stage) {
+    pool->current_stage = stage;
+    pool->sigid++;
+    pool->stage = stage;
+    pool->n_threads_done = 0;
+    pool->signal_index = UINT_MAX;
+    pthread_cond_broadcast(&pool->cond_stage);
+  }
+  while (pool->signal_index == UINT_MAX && pool->n_threads_done < pool->n_threads)
+    pthread_cond_wait(&pool->cond_done, &pool->mutex);
+  if (child) {
+    if (pool->signal_index != UINT_MAX) {
+      *child = pool->signal_index;
+      pool->signal_index = UINT_MAX;
+      pthread_mutex_unlock(&pool->mutex);
+      pthread_cond_broadcast(&pool->cond_stage);
+      return 1;
+    }
+    pthread_mutex_unlock(&pool->mutex);
+    pthread_cond_broadcast(&pool->cond_stage);
+    return 0;
+  }
+  pthread_mutex_unlock(&pool->mutex);
+  tk_threads_wait(pool);
+  pthread_cond_broadcast(&pool->cond_stage);
+  return 0;
+}
+
+// static inline int tk_threads_signal (
+//   tk_threadpool_t *pool,
+//   int stage,
+//   unsigned int *child
+// ) {
+//   pthread_mutex_lock(&pool->mutex);
+//   pool->sigid++;
+//   pool->stage = stage;
+//   pool->n_threads_done = 0;
+//   pool->signal_index  = UINT_MAX;
+//   pthread_cond_broadcast(&pool->cond_stage);
+//   // wait for either a notify or all threads to arrive
+//   while (pool->signal_index == UINT_MAX && pool->n_threads_done < pool->n_threads)
+//     pthread_cond_wait(&pool->cond_done, &pool->mutex);
+//   // child-mode?
+//   if (child) {
+//     if (pool->signal_index != UINT_MAX) {
+//       *child = pool->signal_index;
+//       pool->signal_index = UINT_MAX;
+//       pthread_mutex_unlock(&pool->mutex);
+//       pthread_cond_broadcast(&pool->cond_stage);
+//       return 1;// woke on a notify
+//     }
+//     // all threads done without notify
+//     pthread_mutex_unlock(&pool->mutex);
+//     pthread_cond_broadcast(&pool->cond_stage);
+//     return 0;
+//   }
+//   // normal (no child pointer): full barrier
+//   pthread_mutex_unlock(&pool->mutex);
+//   tk_threads_wait(pool);
+//   pthread_cond_broadcast(&pool->cond_stage);
+//   return 0;
+// }
 
 static inline void tk_threads_pin (
   unsigned int thread_index,
@@ -99,22 +185,7 @@ static inline void tk_threads_pin (
 #endif
 }
 
-static inline void tk_thread_notify_parent (
-  tk_thread_t *thread
-) {
-  pthread_mutex_lock(&thread->pool->mutex);
-  thread->pool->n_threads_done = thread->index + 1;
-  pthread_cond_signal(&thread->pool->cond_done);
-  pthread_mutex_unlock(&thread->pool->mutex);
-
-  pthread_mutex_lock(&thread->child_mutex);
-  thread->waiting_for_ack = 1;
-  while (thread->waiting_for_ack)
-    pthread_cond_wait(&thread->child_cond, &thread->child_mutex);
-  pthread_mutex_unlock(&thread->child_mutex);
-}
-
-static inline void tk_thread_acknowledge_child (
+static inline void tk_threads_acknowledge_child (
   tk_threadpool_t *pool,
   unsigned int child_index
 ) {
@@ -210,9 +281,11 @@ static inline tk_threadpool_t *tk_threads_create (
   pool->n_threads = n_threads,
   pool->n_threads_done = 0;
   pool->sigid = 0;
+  pool->current_stage = INT_MIN;
   pool->stage = -2;
   pool->threads = tk_malloc(L, pool->n_threads * sizeof(tk_thread_t));
   pool->worker = worker;
+  pool->signal_index  = UINT_MAX;
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
     tk_thread_t *data = pool->threads + i;
     data->pool = pool;
@@ -226,29 +299,6 @@ static inline tk_threadpool_t *tk_threads_create (
   }
   tk_threads_wait(pool);
   return pool;
-}
-
-static inline void tk_threads_signal (
-  tk_threadpool_t *pool,
-  int stage,
-  unsigned int *child
-) {
-  pthread_mutex_lock(&pool->mutex);
-  pool->sigid ++;
-  pool->stage = stage;
-  pool->n_threads_done = 0;
-  pthread_cond_broadcast(&pool->cond_stage);
-  pthread_mutex_unlock(&pool->mutex);
-  if (child) {
-    pthread_mutex_lock(&pool->mutex);
-    while (pool->n_threads_done < 1)
-      pthread_cond_wait(&pool->cond_done, &pool->mutex);
-    *child = pool->n_threads_done - 1;
-    pthread_mutex_unlock(&pool->mutex);
-  } else {
-    tk_threads_wait(pool);
-  }
-  pthread_cond_broadcast(&pool->cond_stage);
 }
 
 static inline void tk_threads_destroy (
