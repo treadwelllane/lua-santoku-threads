@@ -1,3 +1,8 @@
+# Now
+
+- Avoid pthreads, mutexes, etc entirely when running with threads <= 1
+    - Lua coroutines? Manual setjmp?
+
 # Next
 
 - Expose a Lua API like santoku-system, except threads instead of processes
