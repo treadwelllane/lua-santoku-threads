@@ -62,6 +62,13 @@ static inline void tk_threads_notify_parent (
   thread->waiting_for_ack = 1;
   pthread_mutex_unlock(&thread->child_mutex);
   pthread_mutex_lock(&thread->pool->mutex);
+  if (!thread->pool->notify_enabled) {
+    pthread_mutex_unlock(&thread->pool->mutex);
+    pthread_mutex_lock(&thread->child_mutex);
+    thread->waiting_for_ack = 0;
+    pthread_mutex_unlock(&thread->child_mutex);
+    return;
+  }
   while (thread->pool->notified_child != -1)
     pthread_cond_wait(&thread->pool->cond_done, &thread->pool->mutex);
   thread->pool->notified_child = (int) thread->index;
@@ -108,8 +115,6 @@ static inline int tk_threads_signal (
   for (;;) {
     if (pool->notified_child != -1) {
       *child = (unsigned int) pool->notified_child;
-      pool->notified_child = -1;
-      pthread_cond_broadcast(&pool->cond_done);
       pthread_mutex_unlock(&pool->mutex);
       return 1;
     }
@@ -169,6 +174,13 @@ static inline void tk_threads_acknowledge_child (
   tk_threadpool_t *pool,
   unsigned int child_index
 ) {
+  pthread_mutex_lock(&pool->mutex);
+  if (pool->notified_child == (int) child_index) {
+    pool->notified_child = -1;
+    pthread_cond_broadcast(&pool->cond_done);
+  }
+  pthread_mutex_unlock(&pool->mutex);
+
   tk_thread_t *child = &pool->threads[child_index];
   pthread_mutex_lock(&child->child_mutex);
   child->waiting_for_ack = 0;
