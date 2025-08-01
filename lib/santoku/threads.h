@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 #ifndef TK_THREADS_H
 #define TK_THREADS_H
 
