@@ -1,5 +1,7 @@
 # Now
 
+- Use Futex
+
 - Avoid pthreads, mutexes, etc entirely when running with threads <= 1
     - Lua coroutines? Manual setjmp?
 
