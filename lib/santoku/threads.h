@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <assert.h>
 #include <sched.h>
+
+#define TK_THREADPOOL_MT "tk_threadpool_t"
+#define TK_THREADPOOL_EPH "tk_threadpool_eph"
 #if __has_include(<numa.h>)
 #define HAVE_NUMA 1
 #include <numa.h>
@@ -35,6 +38,10 @@ struct tk_threadpool_s {
 
   int notify_enabled;
   int notified_child;
+
+  unsigned int n_threads_created;
+  bool is_userdata;
+  bool destroyed;
 };
 
 struct tk_thread_s {
@@ -138,7 +145,8 @@ static inline void tk_threads_pin (
   unsigned int node = thread_index / threads_per_node;
   if (node >= n_nodes) node = n_nodes - 1;
   struct bitmask *cpus = numa_allocate_cpumask();
-  if (numa_node_to_cpus((int) node, cpus) == 0) {
+  int rc = numa_node_to_cpus((int) node, cpus);
+  if (rc == 0) {
     unsigned int count = 0;
     for (unsigned int i = 0; i < cpus->size; ++i) {
       if (numa_bitmask_isbitset(cpus, i)) {
@@ -258,24 +266,46 @@ static inline unsigned int tk_threads_getn (
   return n_threads;
 }
 
+static inline void tk_threads_destroy_internal (tk_threadpool_t *pool);
+
+static inline int tk_threadpool_gc (lua_State *L)
+{
+  tk_threadpool_t *pool = (tk_threadpool_t *) luaL_checkudata(L, 1, TK_THREADPOOL_MT);
+  if (pool->is_userdata)
+    tk_threads_destroy_internal(pool);
+  return 0;
+}
+
 static inline tk_threadpool_t *tk_threads_create (
   lua_State *L,
   unsigned int n_threads,
   tk_thread_worker_t worker
 ) {
-  tk_threadpool_t *pool = tk_malloc(L, sizeof(tk_threadpool_t));
-  // TODO: check errors
+  tk_threadpool_t *pool;
+  int pool_idx;
+  if (L) {
+    pool = tk_lua_newuserdata(L, tk_threadpool_t, TK_THREADPOOL_MT, NULL, tk_threadpool_gc);
+    pool_idx = lua_gettop(L);
+    pool->is_userdata = true;
+  } else {
+    pool = malloc(sizeof(tk_threadpool_t));
+    if (!pool)
+      return NULL;
+    memset(pool, 0, sizeof(tk_threadpool_t));
+    pool->is_userdata = false;
+  }
   pthread_mutex_init(&pool->mutex, NULL);
   pthread_cond_init(&pool->cond_stage, NULL);
   pthread_cond_init(&pool->cond_done, NULL);
-  pool->n_threads = n_threads,
+  pool->n_threads = n_threads;
   pool->n_threads_done = 0;
   pool->sigid = 0;
   pool->stage = -2;
-  pool->threads = tk_malloc(L, pool->n_threads * sizeof(tk_thread_t));
   pool->worker = worker;
   pool->notify_enabled = 0;
   pool->notified_child = -1;
+  pool->n_threads_created = 0;
+  pool->threads = tk_malloc(L, pool->n_threads * sizeof(tk_thread_t));
   for (unsigned int i = 0; i < pool->n_threads; i ++) {
     tk_thread_t *data = pool->threads + i;
     data->pool = pool;
@@ -284,27 +314,45 @@ static inline tk_threadpool_t *tk_threads_create (
     pthread_mutex_init(&data->child_mutex, NULL);
     pthread_cond_init(&data->child_cond, NULL);
     data->waiting_for_ack = 0;
-    if (pthread_create(&data->thread, NULL, tk_thread_worker, data) != 0)
-      tk_error(L, "pthread_create", errno);
+    if (pthread_create(&data->thread, NULL, tk_thread_worker, data) != 0) {
+      if (L)
+        tk_error(L, "pthread_create", errno);
+      else
+        return NULL;
+    }
+    pool->n_threads_created++;
   }
   tk_threads_wait(pool);
   return pool;
 }
 
-static inline void tk_threads_destroy (
-  tk_threadpool_t *pool
-) {
-  tk_threads_signal(pool, -1, NULL);
-  for (unsigned int i = 0; i < pool->n_threads; i ++) {
-    assert(pthread_join(pool->threads[i].thread, NULL) == 0);
-    pthread_mutex_destroy(&pool->threads[i].child_mutex);
-    pthread_cond_destroy(&pool->threads[i].child_cond);
+static inline void tk_threads_destroy_internal (tk_threadpool_t *pool)
+{
+  if (!pool || pool->destroyed)
+    return;
+  if (pool->n_threads_created > 0) {
+    tk_threads_signal(pool, -1, NULL);
+    for (unsigned int i = 0; i < pool->n_threads_created; i ++) {
+      pthread_join(pool->threads[i].thread, NULL);
+      pthread_mutex_destroy(&pool->threads[i].child_mutex);
+      pthread_cond_destroy(&pool->threads[i].child_cond);
+    }
   }
   pthread_mutex_destroy(&pool->mutex);
   pthread_cond_destroy(&pool->cond_stage);
   pthread_cond_destroy(&pool->cond_done);
-  free(pool->threads);
-  free(pool);
+  if (pool->threads)
+    free(pool->threads);
+  if (!pool->is_userdata)
+    free(pool);
+  else
+    pool->destroyed = true;
+}
+
+static inline void tk_threads_destroy (
+  tk_threadpool_t *pool
+) {
+  tk_threads_destroy_internal(pool);
 }
 
 #endif
