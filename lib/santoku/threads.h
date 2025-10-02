@@ -282,10 +282,8 @@ static inline tk_threadpool_t *tk_threads_create (
   tk_thread_worker_t worker
 ) {
   tk_threadpool_t *pool;
-  int pool_idx;
   if (L) {
     pool = tk_lua_newuserdata(L, tk_threadpool_t, TK_THREADPOOL_MT, NULL, tk_threadpool_gc);
-    pool_idx = lua_gettop(L);
     pool->is_userdata = true;
   } else {
     pool = malloc(sizeof(tk_threadpool_t));
