@@ -11,6 +11,22 @@
 #define TK_THREADPOOL_MT "tk_threadpool_t"
 #define TK_THREADPOOL_EPH "tk_threadpool_eph"
 
+// Lua 5.1 compatibility
+#ifndef LUA_OK
+#define LUA_OK 0
+#endif
+
+#if LUA_VERSION_NUM < 502
+#define lua_resume_compat(L, from, narg) lua_resume(L, narg)
+#else
+#define lua_resume_compat(L, from, narg) lua_resume(L, from, narg)
+#endif
+
+// Stage values:
+//   -2: Initial "never started" state (ensures first signal triggers starting)
+//   -1: Shutdown signal (threads exit)
+//   >= 0: Work stages (passed to worker function)
+
 #if __has_include(<numa.h>)
 #define HAVE_NUMA 1
 #include <numa.h>
@@ -19,10 +35,6 @@
 #define numa_available(...) 0
 #define numa_free(p, s) free(p)
 #define numa_alloc_interleaved(s) malloc(s)
-#endif
-
-#if defined(_GNU_SOURCE) || defined(__GLIBC__)
-#define HAVE_PTHREAD_SETAFFINITY 1
 #endif
 
 typedef struct tk_threadpool_s tk_threadpool_t;
@@ -142,7 +154,7 @@ static inline int tk_threads_signal (
 
     if (!child) {
       while (pool->n_threads_done == 0) {
-        int status = lua_resume(t->co.coro, pool->L, 0);
+        int status = lua_resume_compat(t->co.coro, pool->L, 0);
         if (status != LUA_OK && status != LUA_YIELD) {
           lua_xmove(t->co.coro, pool->L, 1);
           lua_error(pool->L);
@@ -161,7 +173,7 @@ static inline int tk_threads_signal (
         pool->notify_enabled = 0;
         return 0;
       }
-      int status = lua_resume(t->co.coro, pool->L, 0);
+      int status = lua_resume_compat(t->co.coro, pool->L, 0);
       if (status != LUA_OK && status != LUA_YIELD) {
         lua_xmove(t->co.coro, pool->L, 1);
         lua_error(pool->L);
@@ -270,7 +282,7 @@ static inline void tk_threads_acknowledge_child (
     if (pool->notified_child == (int) child_index) {
       pool->notified_child = -1;
       tk_thread_t *child = &pool->threads[child_index];
-      int status = lua_resume(child->co.coro, pool->L, 0);
+      int status = lua_resume_compat(child->co.coro, pool->L, 0);
       if (status != LUA_OK && status != LUA_YIELD) {
         lua_xmove(child->co.coro, pool->L, 1);
         lua_error(pool->L);
@@ -435,7 +447,7 @@ static inline tk_threadpool_t *tk_threads_create (
     t->co.coro_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     lua_pushlightuserdata(coro, t);
     lua_pushcclosure(coro, tk_thread_coroutine_wrapper, 1);
-    int status = lua_resume(coro, L, 0);
+    int status = lua_resume_compat(coro, L, 0);
     if (status != LUA_OK && status != LUA_YIELD) {
       luaL_unref(L, LUA_REGISTRYINDEX, t->co.coro_ref);
       free(pool->threads);
@@ -485,7 +497,7 @@ static inline void tk_threads_destroy_internal (tk_threadpool_t *pool)
     pool->notified_child = -1;
 
     tk_thread_t *t = &pool->threads[0];
-    int status = lua_resume(t->co.coro, pool->L, 0);
+    int status = lua_resume_compat(t->co.coro, pool->L, 0);
     (void) status;
 
     for (unsigned int i = 0; i < pool->n_threads; i++) {
