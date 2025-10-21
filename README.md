@@ -1,16 +1,12 @@
 # Santoku Threads
 
-Low-level threading utilities for Lua providing efficient thread pool management with NUMA-aware CPU pinning and inter-thread communication.
+Low-level threading utilities for Lua providing efficient thread pool management
+with CPU affinity and inter-thread communication.
 
-## Overview
+### Compile-Time Configuration
 
-Santoku Threads is a C header library that provides thread pool functionality for Lua applications. It offers:
-
-- Efficient thread pool management with pthreads
-- NUMA-aware CPU pinning for optimal performance
-- Inter-thread signaling and synchronization
-- Child thread notification system
-- Work distribution utilities
+If `pthread.h` is available but the pthread library is not linked, you can
+disable pthread support by defining `TK_NO_PTHREAD`.
 
 ## C API Reference
 
@@ -49,7 +45,7 @@ Santoku Threads is a C header library that provides thread pool functionality fo
 
 | Function | Arguments | Returns | Description |
 |----------|-----------|---------|-------------|
-| `tk_threads_pin` | `thread_index, n_threads` | `-` | Pins thread to CPU core (NUMA-aware) |
+| `tk_threads_pin` | `thread_index, n_threads` | `-` | Pins thread to CPU core using round-robin distribution |
 
 ## License
 

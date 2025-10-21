@@ -1,20 +1,14 @@
 local env = {
 
   name = "santoku-threads",
-  version = "0.0.17-1",
+  version = "0.0.18-1",
   variable_prefix = "TK_THREADS",
   license = "MIT",
   public = true,
 
   dependencies = {
     "lua >= 5.1",
-    "santoku >= 0.0.286-1",
-  },
-
-  test = {
-    dependencies = {
-      "luacov >= 0.15.0-1",
-    }
+    "santoku >= 0.0.290-1",
   },
 
 }

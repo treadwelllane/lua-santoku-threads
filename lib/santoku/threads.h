@@ -3,10 +3,33 @@
 
 #include <santoku/lua/utils.h>
 
-#include <pthread.h>
 #include <unistd.h>
 #include <assert.h>
+
+// Detect pthread support
+// Users can define TK_NO_PTHREAD to disable pthread even if header exists
+// (useful when pthread.h is available but library is not linked)
+#if !defined(TK_NO_PTHREAD)
+  #if defined(__has_include)
+    #if __has_include(<pthread.h>)
+      #define TK_HAS_PTHREAD 1
+    #endif
+  #elif defined(__unix__) || defined(__APPLE__) || defined(__linux__)
+    // Assume pthread.h exists on Unix-like systems if __has_include unavailable
+    #define TK_HAS_PTHREAD 1
+  #endif
+#endif
+
+#ifdef TK_HAS_PTHREAD
+#include <pthread.h>
 #include <sched.h>
+#endif
+
+// Detect pthread affinity support (requires pthread)
+// Note: Android is excluded - pthread_setaffinity_np is unreliable/missing
+#if defined(TK_HAS_PTHREAD) && !defined(__ANDROID__) && (defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__))
+#define TK_HAS_PTHREAD_AFFINITY 1
+#endif
 
 #define TK_THREADPOOL_MT "tk_threadpool_t"
 #define TK_THREADPOOL_EPH "tk_threadpool_eph"
@@ -27,16 +50,6 @@
 //   -1: Shutdown signal (threads exit)
 //   >= 0: Work stages (passed to worker function)
 
-#if __has_include(<numa.h>)
-#define HAVE_NUMA 1
-#include <numa.h>
-#include <numaif.h>
-#else
-#define numa_available(...) 0
-#define numa_free(p, s) free(p)
-#define numa_alloc_interleaved(s) malloc(s)
-#endif
-
 typedef struct tk_threadpool_s tk_threadpool_t;
 typedef struct tk_thread_s tk_thread_t;
 
@@ -45,9 +58,11 @@ typedef void (*tk_thread_worker_t)(void *, int);
 struct tk_threadpool_s {
   lua_State *L;
   bool use_coroutines;
+#ifdef TK_HAS_PTHREAD
   pthread_mutex_t mutex;
   pthread_cond_t cond_stage;
   pthread_cond_t cond_done;
+#endif
   unsigned int n_threads;
   unsigned int n_threads_done;
   int stage;
@@ -67,12 +82,14 @@ struct tk_thread_s {
   void *data;
   tk_threadpool_t *pool;
   union {
+#ifdef TK_HAS_PTHREAD
     struct {
       pthread_t thread;
       pthread_mutex_t child_mutex;
       pthread_cond_t child_cond;
       int waiting_for_ack;
     } pt;
+#endif
     struct {
       lua_State *coro;
       int coro_ref;
@@ -93,6 +110,7 @@ static inline void tk_threads_notify_parent (
     return;
   }
 
+#ifdef TK_HAS_PTHREAD
   pthread_mutex_lock(&thread->pool->mutex);
   int enabled = thread->pool->notify_enabled;
   pthread_mutex_unlock(&thread->pool->mutex);
@@ -118,6 +136,7 @@ static inline void tk_threads_notify_parent (
   while (thread->pt.waiting_for_ack)
     pthread_cond_wait(&thread->pt.child_cond, &thread->pt.child_mutex);
   pthread_mutex_unlock(&thread->pt.child_mutex);
+#endif
 }
 
 static inline void tk_threads_wait (
@@ -126,10 +145,12 @@ static inline void tk_threads_wait (
   if (pool->use_coroutines)
     return;
 
+#ifdef TK_HAS_PTHREAD
   pthread_mutex_lock(&pool->mutex);
   while (pool->n_threads_done < pool->n_threads)
     pthread_cond_wait(&pool->cond_done, &pool->mutex);
   pthread_mutex_unlock(&pool->mutex);
+#endif
 }
 
 static inline int tk_threads_signal (
@@ -181,6 +202,7 @@ static inline int tk_threads_signal (
     }
   }
 
+#ifdef TK_HAS_PTHREAD
   pthread_mutex_lock(&pool->mutex);
   int starting =
     (stage != pool->stage) || (pool->n_threads_done == pool->n_threads) || (pool->stage < 0);
@@ -212,52 +234,22 @@ static inline int tk_threads_signal (
     }
     pthread_cond_wait(&pool->cond_done, &pool->mutex);
   }
+#else
+  // Without pthreads, we should never reach here
+  (void) pool;
+  (void) stage;
+  (void) child;
+  return 0;
+#endif
 }
 
 static inline void tk_threads_pin (
   unsigned int thread_index,
   unsigned int n_threads
 ) {
-#if defined(HAVE_PTHREAD_SETAFFINITY)
+#ifdef TK_HAS_PTHREAD_AFFINITY
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
-
-#if defined(HAVE_NUMA)
-  if (numa_available() != -1 && numa_max_node() > 0) {
-    unsigned int n_nodes = (unsigned int) numa_max_node() + 1;
-    unsigned int threads_per_node = n_threads / n_nodes;
-    if (threads_per_node == 0) threads_per_node = 1;
-    unsigned int node = thread_index / threads_per_node;
-    if (node >= n_nodes) node = n_nodes - 1;
-    struct bitmask *cpus = numa_allocate_cpumask();
-    int rc = numa_node_to_cpus((int) node, cpus);
-    if (rc == 0) {
-      unsigned int count = 0;
-      for (unsigned int i = 0; i < cpus->size; ++i) {
-        if (numa_bitmask_isbitset(cpus, i)) {
-          count ++;
-        }
-      }
-      if (count > 0) {
-        unsigned int local_index =
-          (thread_index - node * threads_per_node) % count;
-        unsigned int found = 0;
-        for (unsigned int i = 0; i < cpus->size; ++i) {
-          if (numa_bitmask_isbitset(cpus, i)) {
-            if (found == local_index) {
-              CPU_SET(i, &cpuset);
-              break;
-            }
-            found ++;
-          }
-        }
-      }
-    }
-    numa_free_cpumask(cpus);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-    return;
-  }
-#endif
 
   long n_cpus = sysconf(_SC_NPROCESSORS_ONLN);
   if (n_cpus > 0) {
@@ -291,6 +283,7 @@ static inline void tk_threads_acknowledge_child (
     return;
   }
 
+#ifdef TK_HAS_PTHREAD
   pthread_mutex_lock(&pool->mutex);
   if (pool->notified_child == (int) child_index) {
     pool->notified_child = -1;
@@ -303,12 +296,14 @@ static inline void tk_threads_acknowledge_child (
   child->pt.waiting_for_ack = 0;
   pthread_cond_signal(&child->pt.child_cond);
   pthread_mutex_unlock(&child->pt.child_mutex);
+#endif
 }
 
+#ifdef TK_HAS_PTHREAD
 static void *tk_thread_worker (void *arg)
 {
   tk_thread_t *data = (tk_thread_t *) arg;
-#if defined(HAVE_PTHREAD_SETAFFINITY)
+#ifdef TK_HAS_PTHREAD_AFFINITY
   tk_threads_pin(data->index, data->pool->n_threads);
 #endif
   pthread_mutex_lock(&data->pool->mutex);
@@ -335,6 +330,7 @@ static void *tk_thread_worker (void *arg)
   }
   return NULL;
 }
+#endif
 
 static inline void tk_thread_range (
   unsigned int thread_index,
@@ -458,6 +454,7 @@ static inline tk_threadpool_t *tk_threads_create (
     return pool;
   }
 
+#ifdef TK_HAS_PTHREAD
   pthread_mutex_init(&pool->mutex, NULL);
   pthread_cond_init(&pool->cond_stage, NULL);
   pthread_cond_init(&pool->cond_done, NULL);
@@ -481,6 +478,14 @@ static inline tk_threadpool_t *tk_threads_create (
   }
   tk_threads_wait(pool);
   return pool;
+#else
+  // Without pthreads, multi-threading is not supported
+  if (L)
+    return (tk_threadpool_t *) tk_lua_error(L, "pthread support not available");
+  free(pool->threads);
+  free(pool);
+  return NULL;
+#endif
 }
 
 static inline void tk_threads_destroy_internal (tk_threadpool_t *pool)
@@ -512,6 +517,7 @@ static inline void tk_threads_destroy_internal (tk_threadpool_t *pool)
     return;
   }
 
+#ifdef TK_HAS_PTHREAD
   if (pool->n_threads_created > 0) {
     tk_threads_signal(pool, -1, NULL);
     for (unsigned int i = 0; i < pool->n_threads_created; i ++) {
@@ -529,6 +535,7 @@ static inline void tk_threads_destroy_internal (tk_threadpool_t *pool)
     free(pool);
   else
     pool->destroyed = true;
+#endif
 }
 
 static inline void tk_threads_destroy (
