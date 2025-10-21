@@ -244,8 +244,7 @@ static inline int tk_threads_signal (
 }
 
 static inline void tk_threads_pin (
-  unsigned int thread_index,
-  unsigned int n_threads
+  unsigned int thread_index
 ) {
 #ifdef TK_HAS_PTHREAD_AFFINITY
   cpu_set_t cpuset;
@@ -304,7 +303,7 @@ static void *tk_thread_worker (void *arg)
 {
   tk_thread_t *data = (tk_thread_t *) arg;
 #ifdef TK_HAS_PTHREAD_AFFINITY
-  tk_threads_pin(data->index, data->pool->n_threads);
+  tk_threads_pin(data->index);
 #endif
   pthread_mutex_lock(&data->pool->mutex);
   data->pool->n_threads_done ++;
