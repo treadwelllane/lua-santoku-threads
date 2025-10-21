@@ -249,7 +249,6 @@ static inline void tk_threads_pin (
 #ifdef TK_HAS_PTHREAD_AFFINITY
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
-
   long n_cpus = sysconf(_SC_NPROCESSORS_ONLN);
   if (n_cpus > 0) {
     unsigned int cpu = thread_index % (unsigned int) n_cpus;
@@ -258,7 +257,6 @@ static inline void tk_threads_pin (
   }
 #else
   (void) thread_index;
-  (void) n_threads;
 #endif
 }
 
