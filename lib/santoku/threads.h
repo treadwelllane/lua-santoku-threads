@@ -6,17 +6,21 @@
 #include <unistd.h>
 #include <assert.h>
 
-// Detect pthread support
-// Users can define TK_NO_PTHREAD to disable pthread even if header exists
-// (useful when pthread.h is available but library is not linked)
 #if !defined(TK_NO_PTHREAD)
   #if defined(__has_include)
     #if __has_include(<pthread.h>)
       #define TK_HAS_PTHREAD 1
     #endif
   #elif defined(__unix__) || defined(__APPLE__) || defined(__linux__)
-    // Assume pthread.h exists on Unix-like systems if __has_include unavailable
     #define TK_HAS_PTHREAD 1
+  #endif
+#endif
+
+#if !defined(TK_NO_NUMA)
+  #if defined(__has_include)
+    #if __has_include(<numa.h>)
+      #define TK_HAS_NUMA 1
+    #endif
   #endif
 #endif
 
@@ -25,8 +29,15 @@
 #include <sched.h>
 #endif
 
-// Detect pthread affinity support (requires pthread)
-// Note: Android is excluded - pthread_setaffinity_np is unreliable/missing
+#ifdef TK_HAS_NUMA
+#include <numa.h>
+#include <numaif.h>
+#else
+#define numa_available(...) 0
+#define numa_free(p, s) free(p)
+#define numa_alloc_interleaved(s) malloc(s)
+#endif
+
 #if defined(TK_HAS_PTHREAD) && !defined(__ANDROID__) && (defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__))
 #define TK_HAS_PTHREAD_AFFINITY 1
 #endif
@@ -34,7 +45,6 @@
 #define TK_THREADPOOL_MT "tk_threadpool_t"
 #define TK_THREADPOOL_EPH "tk_threadpool_eph"
 
-// Lua 5.1 compatibility
 #ifndef LUA_OK
 #define LUA_OK 0
 #endif
@@ -44,11 +54,6 @@
 #else
 #define lua_resume_compat(L, from, narg) lua_resume(L, from, narg)
 #endif
-
-// Stage values:
-//   -2: Initial "never started" state (ensures first signal triggers starting)
-//   -1: Shutdown signal (threads exit)
-//   >= 0: Work stages (passed to worker function)
 
 typedef struct tk_threadpool_s tk_threadpool_t;
 typedef struct tk_thread_s tk_thread_t;
@@ -244,11 +249,48 @@ static inline int tk_threads_signal (
 }
 
 static inline void tk_threads_pin (
-  unsigned int thread_index
+  unsigned int thread_index,
+  unsigned int n_threads
 ) {
-#ifdef TK_HAS_PTHREAD_AFFINITY
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
+#ifdef TK_HAS_NUMA
+  if (numa_available() != -1 && numa_max_node() > 0) {
+    unsigned int n_nodes = (unsigned int) numa_max_node() + 1;
+    unsigned int threads_per_node = n_threads / n_nodes;
+    if (threads_per_node == 0) threads_per_node = 1;
+    unsigned int node = thread_index / threads_per_node;
+    if (node >= n_nodes) node = n_nodes - 1;
+    struct bitmask *cpus = numa_allocate_cpumask();
+    int rc = numa_node_to_cpus((int) node, cpus);
+    if (rc == 0) {
+      unsigned int count = 0;
+      for (unsigned int i = 0; i < cpus->size; ++i) {
+        if (numa_bitmask_isbitset(cpus, i)) {
+          count ++;
+        }
+      }
+      if (count > 0) {
+        unsigned int local_index =
+          (thread_index - node * threads_per_node) % count;
+        unsigned int found = 0;
+        for (unsigned int i = 0; i < cpus->size; ++i) {
+          if (numa_bitmask_isbitset(cpus, i)) {
+            if (found == local_index) {
+              CPU_SET(i, &cpuset);
+              break;
+            }
+            found ++;
+          }
+        }
+      }
+    }
+    numa_free_cpumask(cpus);
+    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    return;
+  }
+#else
+#ifdef TK_HAS_PTHREAD_AFFINITY
   long n_cpus = sysconf(_SC_NPROCESSORS_ONLN);
   if (n_cpus > 0) {
     unsigned int cpu = thread_index % (unsigned int) n_cpus;
@@ -257,6 +299,8 @@ static inline void tk_threads_pin (
   }
 #else
   (void) thread_index;
+  (void) n_threads;
+#endif
 #endif
 }
 
@@ -301,7 +345,7 @@ static void *tk_thread_worker (void *arg)
 {
   tk_thread_t *data = (tk_thread_t *) arg;
 #ifdef TK_HAS_PTHREAD_AFFINITY
-  tk_threads_pin(data->index);
+  tk_threads_pin(data->index, data->pool->n_threads);
 #endif
   pthread_mutex_lock(&data->pool->mutex);
   data->pool->n_threads_done ++;
