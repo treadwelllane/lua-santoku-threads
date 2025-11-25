@@ -6,16 +6,12 @@
 #include <unistd.h>
 #include <assert.h>
 
-// Detect pthread support
-// Users can define TK_NO_PTHREAD to disable pthread even if header exists
-// (useful when pthread.h is available but library is not linked)
 #if !defined(TK_NO_PTHREAD)
   #if defined(__has_include)
     #if __has_include(<pthread.h>)
       #define TK_HAS_PTHREAD 1
     #endif
   #elif defined(__unix__) || defined(__APPLE__) || defined(__linux__)
-    // Assume pthread.h exists on Unix-like systems if __has_include unavailable
     #define TK_HAS_PTHREAD 1
   #endif
 #endif
@@ -25,8 +21,6 @@
 #include <sched.h>
 #endif
 
-// Detect pthread affinity support (requires pthread)
-// Note: Android is excluded - pthread_setaffinity_np is unreliable/missing
 #if defined(TK_HAS_PTHREAD) && !defined(__ANDROID__) && (defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__))
 #define TK_HAS_PTHREAD_AFFINITY 1
 #endif
@@ -34,7 +28,6 @@
 #define TK_THREADPOOL_MT "tk_threadpool_t"
 #define TK_THREADPOOL_EPH "tk_threadpool_eph"
 
-// Lua 5.1 compatibility
 #ifndef LUA_OK
 #define LUA_OK 0
 #endif
@@ -44,11 +37,6 @@
 #else
 #define lua_resume_compat(L, from, narg) lua_resume(L, from, narg)
 #endif
-
-// Stage values:
-//   -2: Initial "never started" state (ensures first signal triggers starting)
-//   -1: Shutdown signal (threads exit)
-//   >= 0: Work stages (passed to worker function)
 
 typedef struct tk_threadpool_s tk_threadpool_t;
 typedef struct tk_thread_s tk_thread_t;
@@ -235,7 +223,6 @@ static inline int tk_threads_signal (
     pthread_cond_wait(&pool->cond_done, &pool->mutex);
   }
 #else
-  // Without pthreads, we should never reach here
   (void) pool;
   (void) stage;
   (void) child;
@@ -476,7 +463,6 @@ static inline tk_threadpool_t *tk_threads_create (
   tk_threads_wait(pool);
   return pool;
 #else
-  // Without pthreads, multi-threading is not supported
   if (L)
     return (tk_threadpool_t *) tk_lua_error(L, "pthread support not available");
   free(pool->threads);
